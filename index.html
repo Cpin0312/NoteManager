@@ -129,7 +129,7 @@
       <input type="text" id="sReplace" placeholder="置き換え">
     </div>
     <div class="row">
-      <label title="¥ と ￥ は \ として使えます（円記号そのものは ¥）"><input type="checkbox" id="sRegex"> 正規表現</label>
+      <label title="半角の ¥ は \ として使えます（半角の円記号そのものは ¥）。全角の ￥ は文字のまま"><input type="checkbox" id="sRegex"> 正規表現</label>
       <label><input type="checkbox" id="sCase"> 大文字小文字</label>
       <span style="flex:1"></span>
       <select id="sOp" title="する操作">
@@ -660,8 +660,8 @@ function makeRe(global) {
   const q = $('sQuery').value, box = $('sQuery');
   box.classList.remove('bad'); note('');
   if (!q) { note('探す文字を入れてください。', 'err'); return null; }
-  // Windows の ¥ キーは日本語入力の状態で ¥(U+00A5)・￥(U+FFE5) になる。正規表現ではどちらも \ として扱う
-  const src = $('sRegex').checked ? q.replace(/[¥￥]/g, '\\') : q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // 正規表現では半角の ¥(U+00A5) を \ として扱う。全角の ￥ は文字のまま（金額などを探せるように）
+  const src = $('sRegex').checked ? q.replace(/¥/g, '\\') : q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   try { return new RegExp(src, 'mu' + (global ? 'g' : '') + ($('sCase').checked ? '' : 'i')); }
   catch (e) { box.classList.add('bad'); note('正規表現がまちがっています：' + e.message, 'err'); return null; }
 }
