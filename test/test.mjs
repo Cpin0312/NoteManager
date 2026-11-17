@@ -165,6 +165,13 @@ ok('大文字小文字を区別の切りかえ', caseOn === 0 && (await hits()).
 // 正規表現
 await setVal('sRegex', true); await setVal('sQuery', '^[a-c]$'); await J(`search(); 1`); await sleep(200);
 ok('正規表現で探す', (await hits()).length === 3, JSON.stringify(await hits()));
+for (const y of ['¥', '￥', '\\']) {
+  await setVal('sQuery', '^' + y + 'w$'); await J(`search(); 1`); await sleep(200);
+  ok('正規表現の ' + y + ' は \\ として動く', (await hits()).length === 3, JSON.stringify(await hits()));
+}
+await setVal('sRegex', false); await setVal('sQuery', '¥w'); await J(`search(); 1`); await sleep(200);
+ok('ふつうの検索では ¥ は文字のまま', (await hits()).length === 0 && !(await J(`document.getElementById('sQuery').classList.contains('bad')`)), JSON.stringify(await hits()));
+await setVal('sRegex', true);
 await setVal('sQuery', '('); await J(`search(); 1`); await sleep(200);
 ok('まちがった正規表現は赤で知らせる', (await J(`document.getElementById('sQuery').classList.contains('bad')`)) && (await J(`document.getElementById('searchErr').textContent`)).includes('正規表現がまちがっています'), await J(`document.getElementById('searchErr').textContent`));
 // ===== 窓の操作：置き換え（今のファイルだけ・押したらすぐ・編集画面だけ）=====
