@@ -61,8 +61,7 @@
   #edRow { flex: 1; display: flex; min-height: 0; }
   #editor, #gutter, #mirror { font: 15px/1.6 Consolas, "BIZ UDGothic", "MS Gothic", monospace; }
   #editor { flex: 1; min-width: 0; border: 0; padding: 12px 16px; resize: none; outline: none; background: var(--panel); }
-  #gutter { order: -1; flex: none; min-width: 2.5em; overflow: hidden; padding: 12px 8px 12px 10px; text-align: right; color: #9a9a9a; background: var(--bg); border-right: 1px solid var(--line); user-select: none; }
-  #gutter div { white-space: nowrap; }
+  #gutter { white-space: pre; order: -1; flex: none; min-width: 2.5em; overflow: hidden; padding: 12px 8px 12px 10px; text-align: right; color: #9a9a9a; background: var(--bg); border-right: 1px solid var(--line); user-select: none; }
   #mirror { position: absolute; left: -99999px; top: 0; visibility: hidden; white-space: pre-wrap; overflow-wrap: break-word; }
   #fmt { white-space: nowrap; }
   #editor:disabled { background: var(--bg); }
@@ -444,6 +443,8 @@ function sjisTable() {
   const leads = [];
   for (let l = 0x81; l <= 0xFC; l++) if (l < 0xA0 || l > 0xDF) if (l !== 0xED && l !== 0xEE) leads.push(l);
   for (const l of [...leads, 0xED, 0xEE]) for (let t = 0x40; t <= 0xFC; t++) if (t !== 0x7F) put([l, t]);
+  // 読むと出てこないが、書くときは標準（WHATWG）と同じく置きかえる：¥→0x5C（Windows では ¥ に見える）、‾→0x7E、−→－
+  m.set('\u00A5', [0x5C]); m.set('\u203E', [0x7E]); m.set('\u2212', m.get('\uFF0D'));
   return (sjisMap = m);
 }
 function encodeSjis(text) {
@@ -700,19 +701,30 @@ async function copyTree(h, destDir, name) {
   if (back.length !== bytes.length || back.some((b, i) => b !== bytes[i])) throw new Error('コピーした「' + name + '」の中身が元と違います');
 }
 
-// ---------- 行番号（折り返した行も合わせる：見えない写しで、行ごとの高さを測る） ----------
-// shortcut: 打つたびに全部の行を作り直す。数万行で重くなったら、見えている所だけ作る形にする
-let gutterReq = 0;
+// ---------- 行番号（折り返した行も合わせる） ----------
+// 行番号は1つの文字列：番号のあとに、その行が画面で使う段の数だけ改行を入れる
+// 2万行で1回打つと、行番号なしより 0.02〜0.03 秒ほど遅い（2026-11-17 に測った）。
+// 段の数は、短い行は数えずに1段。長い行やタブのある行だけ、見えない写しで測り、文ごとに覚える（幅が変わったら忘れる）
+let gutterReq = 0, rowCache = new Map(), cacheW = 0;
 function updateGutter() { cancelAnimationFrame(gutterReq); gutterReq = requestAnimationFrame(drawGutter); }
 function drawGutter() {
   const ed = $('editor'), g = $('gutter'), mir = $('mirror');
-  if (ed.classList.contains('hidden')) { g.replaceChildren(); return; }
-  const cs = getComputedStyle(ed);
-  mir.style.width = (ed.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight)) + 'px';
-  mir.replaceChildren(...ed.value.split('\n').map(l => { const d = document.createElement('div'); d.textContent = l || ' '; return d; }));
-  const hs = [...mir.children].map(d => d.getBoundingClientRect().height);
-  mir.replaceChildren();
-  g.replaceChildren(...hs.map((h, i) => { const d = document.createElement('div'); d.textContent = i + 1; d.style.height = h + 'px'; return d; }));
+  if (ed.classList.contains('hidden')) { g.textContent = ''; return; }
+  const cs = getComputedStyle(ed), lh = parseFloat(cs.lineHeight), em = parseFloat(cs.fontSize);
+  const w = ed.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+  if (w !== cacheW || rowCache.size > 50000) { rowCache.clear(); cacheW = w; }
+  const lines = ed.value.split('\n');
+  // 1文字は広くても 1.25 文字ぶん（全角・絵文字）なので、それで収まる行は必ず1段
+  const need = [...new Set(lines.filter(l => !rowCache.has(l) && (l.includes('\t') || l.length * em * 1.25 > w)))];
+  if (need.length) {
+    mir.style.width = w + 'px';
+    mir.replaceChildren(...need.map(l => { const d = document.createElement('div'); d.textContent = l; return d; }));
+    [...mir.children].forEach((d, i) => rowCache.set(need[i], Math.max(1, Math.round(d.getBoundingClientRect().height / lh))));
+    mir.replaceChildren();
+  }
+  let s = '';
+  for (let i = 0; i < lines.length; i++) s += (i + 1) + '\n'.repeat(rowCache.get(lines[i]) || 1);
+  g.textContent = s;
   g.scrollTop = ed.scrollTop;
 }
 
@@ -923,8 +935,8 @@ function runBlocked() {
   if (['replace', 'delete'].includes($('sOp').value) && !$('sQuery').value) return 'この操作は、探す文字が要ります。';
   return '';
 }
-// 正規表現のときの置き換える文字：\n は改行、\t はタブ、\\ は \ そのもの。半角の ¥ も \ として扱う（$1 などはそのまま）
-const expandRep = r => r.replace(/¥/g, '\\').replace(/\\([nt\\])/g, (m, c) => c === 'n' ? '\n' : c === 't' ? '\t' : '\\');
+// 正規表現のときの置き換える文字：\n（¥n）は改行、\t（¥t）はタブ、\\（¥¥）は \ そのもの。ほかの ¥ は円記号のまま（¥$1 で「¥100」）
+const expandRep = r => r.replace(/[\\¥]([nt\\¥])/g, (m, c) => c === 'n' ? '\n' : c === 't' ? '\t' : '\\');
 const SPACE = '[ \\u3000\\t]+';   // 半角スペース・全角スペース・タブ
 function runOp() {
   const why = runBlocked(); if (why) { note(why, 'err'); return false; }

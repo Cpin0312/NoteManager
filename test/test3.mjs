@@ -22,7 +22,8 @@ const setVal = (id, v) => J(`(()=>{const e=document.getElementById('${id}'); if 
 const typeEnd = async t => { await J(`(()=>{const e=document.getElementById('editor');e.focus();e.setSelectionRange(e.value.length,e.value.length);return 1})()`); await c.send('Input.insertText', { text: t }); await sleep(100); };
 const save = async () => { await J(`save().then(()=>1)`); await sleep(200); };
 const readOpfs = p => J(`(async()=>{const r=await navigator.storage.getDirectory();return [...new Uint8Array(await (await (await r.getFileHandle(${JSON.stringify(p)})).getFile()).arrayBuffer())].join(',')})()`);
-const gutter = () => J(`[...document.querySelectorAll('#gutter div')].map(d=>d.textContent+':'+Math.round(d.getBoundingClientRect().height))`);
+// 行番号を [番号:高さ(px)] に。高さは、その番号が使う段の数 × 行の高さ
+const gutter = () => J(`(()=>{const g=document.getElementById('gutter'),lh=parseFloat(getComputedStyle(g).lineHeight),out=[];for(const p of g.textContent.split('\\n')){if(p)out.push([p,1]);else if(out.length)out.at(-1)[1]++}out.length&&out.at(-1)[1]--;return out.map(([n,r])=>n+':'+Math.round(r*lh))})()`);
 
 const SJIS = [0x82, 0xA0, 0x82, 0xA2, 13, 10, 0xB1, 0x87, 0x40, 0xFB, 0xFC, 0x81, 0x60];   // あい CRLF ｱ①髙～
 await J(`(async()=>{const r=await navigator.storage.getDirectory();for await (const k of r.keys()) await r.removeEntry(k,{recursive:true});
@@ -48,6 +49,9 @@ const m1 = await msg();
 ok('表せない文字は保存せず、文字と行を知らせる', m1.startsWith('err') && m1.includes('😀') && m1.includes('3 行目'), m1);
 ok('そのときファイルは元のまま・画面の文も残る', (await readOpfs('sjis.txt')) === [...SJIS, 0x82, 0xA4].join(',') && (await edv()).endsWith('😀') && (await J(`dirty`)), await readOpfs('sjis.txt'));
 await J(`(()=>{const e=document.getElementById('editor');e.value=e.value.replace('\\n😀','');e.dispatchEvent(new Event('input'));return 1})()`);
+await typeEnd('¥‾−'); await save();
+ok('Shift_JIS に ¥ ‾ − は標準どおり書ける（0x5C 0x7E 0x817C）', (await readOpfs('sjis.txt')).endsWith('130,164,92,126,129,124'), (await msg()) + ' ' + await readOpfs('sjis.txt'));
+await J(`(()=>{const e=document.getElementById('editor');e.value=e.value.slice(0,-3);e.dispatchEvent(new Event('input'));return 1})()`);
 await setVal('fQuery', 'ｱ①'); await sleep(900);
 ok('ファイル検索で Shift_JIS の中身も探す', (await J(`[...document.querySelectorAll('#fResults .hit')].map(e=>e.textContent).join()`)).includes('sjis.txt'), await J(`document.getElementById('fResults').textContent`));
 await setVal('fQuery', ''); await sleep(400);
@@ -85,7 +89,7 @@ ok('番号と文の全体の高さがそろう', Math.abs(align[0] - align[1]) <
 await J(`mdMode = true; refreshState(); 1`); await sleep(200);
 ok('MD表示のときは番号を隠す', await J(`document.getElementById('edRow').classList.contains('hidden')`));
 await J(`mdMode = false; refreshState(); 1`); await sleep(200);
-ok('編集に戻ると番号が出る', await J(`!document.getElementById('edRow').classList.contains('hidden') && document.querySelectorAll('#gutter div').length === 203`));
+ok('編集に戻ると番号が出る', await J(`!document.getElementById('edRow').classList.contains('hidden') && document.getElementById('gutter').textContent.trim().split(/\\n+/).length === 203`));
 
 // ===== 置き換えで改行を入れる・消す =====
 await open('repl.txt');
@@ -104,6 +108,9 @@ await run('\\t', '¥¥');
 ok('¥¥ で \\ そのもの', (await edv()) === 'りんご\\みかん\\ぶどうAB', JSON.stringify(await edv()));
 await run('(みかん)', '[$1]¥n');
 ok('$1 と ¥n をいっしょに使える', (await edv()) === 'りんご\\[みかん]\n\\ぶどうAB', JSON.stringify(await edv()));
+await J(`(()=>{const e=document.getElementById('editor');e.value='100円';e.dispatchEvent(new Event('input'));return 1})()`); await run('(\\d+)円', '¥$1');
+ok('置き換え欄のほかの ¥ は円記号のまま（¥$1 → ¥100）', (await edv()) === '¥100', JSON.stringify(await edv()));
+await J(`(()=>{const e=document.getElementById('editor');e.value='りんご\\\\[みかん]\\n\\\\ぶどうAB';e.dispatchEvent(new Event('input'));return 1})()`);
 await run('ご', 'ご¥n', false);
 ok('ふつうの検索では ¥n は文字のまま', (await edv()).startsWith('りんご¥n\\'), JSON.stringify(await edv()));
 
