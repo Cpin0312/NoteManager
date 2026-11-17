@@ -36,7 +36,7 @@ await J(`(async()=>{const r=await navigator.storage.getDirectory();for await (co
  await idbSet('root', r); await openRoot(r); return 1})()`);
 await sleep(500);
 const tree = await J(`[...document.querySelectorAll('.item')].map(e=>e.dataset.path+(e.classList.contains('binary')?'(灰)':'')).join(' ')`);
-ok('木に全部のファイル、画像と SJIS は灰色', tree.includes('bin.png(灰)') && tree.includes('sjis.txt(灰)') && tree.includes('script.js ') || tree.endsWith('script.js'), tree);
+ok('木に全部のファイル、画像は灰色・Shift_JIS は開ける', tree.includes('bin.png(灰)') && tree.includes('sjis.txt') && !tree.includes('sjis.txt(灰)') && tree.includes('script.js ') || tree.endsWith('script.js'), tree);
 // フォルダ作成
 promptText = 'メモ'; await click('#btnNewFolder'); await sleep(500);
 ok('フォルダ作成', (await msg()).includes('フォルダを作りました：メモ'), await msg());

@@ -58,7 +58,13 @@
   #fileBar { display: flex; align-items: center; gap: 8px; padding: 6px 12px; border-bottom: 1px solid var(--line); background: var(--panel); min-height: 38px; }
   #fileName { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #dirtyMark { color: var(--err); font-weight: 600; }
-  #editor { flex: 1; width: 100%; border: 0; padding: 12px 16px; font: 15px/1.6 Consolas, "BIZ UDGothic", "MS Gothic", monospace; resize: none; outline: none; background: var(--panel); }
+  #edRow { flex: 1; display: flex; min-height: 0; }
+  #editor, #gutter, #mirror { font: 15px/1.6 Consolas, "BIZ UDGothic", "MS Gothic", monospace; }
+  #editor { flex: 1; min-width: 0; border: 0; padding: 12px 16px; resize: none; outline: none; background: var(--panel); }
+  #gutter { order: -1; flex: none; min-width: 2.5em; overflow: hidden; padding: 12px 8px 12px 10px; text-align: right; color: #9a9a9a; background: var(--bg); border-right: 1px solid var(--line); user-select: none; }
+  #gutter div { white-space: nowrap; }
+  #mirror { position: absolute; left: -99999px; top: 0; visibility: hidden; white-space: pre-wrap; overflow-wrap: break-word; }
+  #fmt { white-space: nowrap; }
   #editor:disabled { background: var(--bg); }
   #mdView { flex: 1; overflow: auto; padding: 16px 24px; background: var(--panel); line-height: 1.7; word-wrap: break-word; }
   #mdView h1, #mdView h2 { border-bottom: 1px solid var(--line); padding-bottom: .2em; }
@@ -108,11 +114,13 @@
       <span id="fileName">ノートが選ばれていません</span>
       <span id="dirtyMark" class="hidden" title="保存していない変更があります">● 未保存</span>
       <span style="flex:1"></span>
+      <span id="fmt" class="hint" title="文字コード・改行コード（保存はこの形で書きます）"></span>
       <button id="btnMd" disabled title="Markdown として表示（表示中は編集できません）">MD表示</button>
       <button id="btnSave" class="primary" disabled title="Ctrl+S">保存</button>
     </div>
     <div id="welcome">左の「フォルダ選択」で、ノートを置く親フォルダを選んでください。<br>次からは前回のフォルダが開きます。</div>
-    <textarea id="editor" class="hidden" spellcheck="false"></textarea>
+    <div id="edRow" class="hidden"><textarea id="editor" class="hidden" spellcheck="false"></textarea><div id="gutter" aria-hidden="true"></div></div>
+    <div id="mirror" aria-hidden="true"></div>
     <div id="mdView" class="hidden"></div>
   </section>
 </main>
@@ -126,10 +134,10 @@
       <span id="hitInfo" class="hint"></span>
     </div>
     <div class="row">
-      <input type="text" id="sReplace" placeholder="置き換え">
+      <input type="text" id="sReplace" placeholder="置き換え（正規表現のときは ¥n で改行・¥t でタブ）">
     </div>
     <div class="row">
-      <label title="半角の ¥ は \ として使えます（半角の円記号そのものは ¥）。全角の ￥ は文字のまま"><input type="checkbox" id="sRegex"> 正規表現</label>
+      <label title="半角の ¥ は \ として使えます（半角の円記号そのものは \u00A5）。全角の ￥ は文字のまま。改行は ¥n"><input type="checkbox" id="sRegex"> 正規表現</label>
       <label><input type="checkbox" id="sCase"> 大文字小文字</label>
       <span style="flex:1"></span>
       <select id="sOp" title="する操作">
@@ -157,7 +165,7 @@
 const $ = id => document.getElementById(id);
 let root = null;          // 親フォルダの handle
 let selectedDir = null;   // 新規作成先（木で選んだフォルダ）
-let current = null;       // { handle, path, crlf, bom }
+let current = null;       // { handle, path, crlf, bom, enc, mixed }
 let savedText = '';
 let dirty = false;
 
@@ -212,7 +220,7 @@ window.addEventListener('beforeunload', e => { if (dirty) { e.preventDefault(); 
 async function openRoot(handle) {
   root = handle;
   selectedDir = { handle, path: '' };
-  current = null;
+  current = null; showFmt();
   savedText = '';
   setDirty(false);
   $('editor').value = '';
@@ -273,11 +281,16 @@ async function start() {
 
 // ---------- 文字のファイルか（拡張子でなく中身で見る） ----------
 const HEAD = 8192;
-// 先頭 8KB に NUL がなく、UTF-8 として読めれば文字のファイル
-function isTextHead(bytes) {
-  if (bytes.includes(0)) return false;
-  try { new TextDecoder('utf-8', { fatal: true }).decode(bytes, { stream: true }); return true; } catch (e) { return false; }
+// 文字コードを中身で見分ける。NUL があれば文字でない。UTF-8 として正しければ UTF-8、だめなら Shift_JIS として正しければ Shift_JIS
+// stream は先頭だけを見るとき（最後で切れた文字をまちがいにしない）
+function detectEnc(bytes, stream) {
+  if (bytes.includes(0)) return null;
+  for (const enc of ['utf-8', 'shift_jis']) {
+    try { new TextDecoder(enc, { fatal: true }).decode(bytes, { stream }); return enc; } catch (e) {}
+  }
+  return null;
 }
+const isTextHead = bytes => !!detectEnc(bytes, true);
 async function checkText(fileHandle) {
   const f = await fileHandle.getFile();
   return isTextHead(new Uint8Array(await f.slice(0, HEAD).arrayBuffer()));
@@ -373,14 +386,14 @@ async function openNote(node, row) {
   let r;
   try { r = await readText(node.handle); }
   catch (e) {
-    showMsg(e instanceof TypeError ? '「' + node.path + '」は文字のファイルではないので開けません（UTF-8 の文字のファイルだけ開けます）。' : '開けませんでした：' + errText(e), 'err');
+    showMsg(e instanceof TypeError ? '「' + node.path + '」は文字のファイルではないので開けません（UTF-8 か Shift_JIS の文字のファイルだけ開けます）。' : '開けませんでした：' + errText(e), 'err');
     return false;
   }
   current = node;
-  node.bom = r.bom; node.crlf = r.crlf;
+  node.bom = r.bom; node.crlf = r.crlf; node.enc = r.enc; node.mixed = r.mixed;
   savedText = r.text;
   const ed = $('editor');
-  ed.value = savedText;
+  ed.value = savedText; ed.scrollTop = 0; showFmt(); updateGutter();
   $('welcome').classList.add('hidden');
   $('fileName').textContent = node.path;
   $('btnSave').disabled = false;
@@ -407,23 +420,57 @@ async function revealInTree(path) {
 // 文字のファイルを読む。文字でなければ TypeError。text は改行を \n にそろえたもの
 async function readText(handle) {
   const bytes = new Uint8Array(await (await handle.getFile()).arrayBuffer());
-  // 画像・docx・Shift_JIS などは、UTF-8 で保存すると壊れるので開かない
-  if (bytes.includes(0)) throw new TypeError('not text');
-  let text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
-  const bom = text.startsWith('\uFEFF');
+  // 画像・docx・UTF-16 など、UTF-8 でも Shift_JIS でもないものは、保存すると壊れるので開かない
+  const enc = detectEnc(bytes, false);
+  if (!enc) throw new TypeError('not text');
+  let text = new TextDecoder(enc, { fatal: true, ignoreBOM: true }).decode(bytes);
+  const bom = enc === 'utf-8' && text.startsWith('\uFEFF');
   if (bom) text = text.slice(1);
-  // 改行の形を元のまま保つ（CRLF が LF 以上なら CRLF で保存）
-  const crlfCount = (text.match(/\r\n/g) || []).length;
-  const crlf = crlfCount > 0 && crlfCount >= (text.match(/\n/g) || []).length - crlfCount;
-  return { text: text.replace(/\r\n?/g, '\n'), bom, crlf };
+  // 改行の形を元のまま保つ（CRLF が LF 以上なら CRLF で保存）。形がまざっていたら知らせる
+  const crlfCount = (text.match(/\r\n/g) || []).length, lfCount = (text.match(/\n/g) || []).length - crlfCount, crCount = (text.match(/\r(?!\n)/g) || []).length;
+  const crlf = crlfCount > 0 && crlfCount >= lfCount;
+  const mixed = [crlfCount, lfCount, crCount].filter(n => n > 0).length > 1;
+  return { text: text.replace(/\r\n?/g, '\n'), bom, crlf, enc, mixed };
 }
+// Shift_JIS に書く。表は、ブラウザの Shift_JIS の読み方を逆にして作る（読んだ文字は同じ文字に戻る）
+// 同じ文字が2か所にあるときは、Windows と同じく先の方を使う。NEC 選定 IBM 拡張（先頭 0xED・0xEE）は、IBM 拡張（0xFA〜）があればそちら
+let sjisMap = null;
+function sjisTable() {
+  if (sjisMap) return sjisMap;
+  const dec = new TextDecoder('shift_jis'), m = new Map();
+  const put = b => { const s = dec.decode(new Uint8Array(b)); if (s.length === 1 && s !== '\uFFFD' && !m.has(s)) m.set(s, b); };
+  for (let b = 0; b <= 0x80; b++) put([b]);
+  for (let b = 0xA1; b <= 0xDF; b++) put([b]);
+  const leads = [];
+  for (let l = 0x81; l <= 0xFC; l++) if (l < 0xA0 || l > 0xDF) if (l !== 0xED && l !== 0xEE) leads.push(l);
+  for (const l of [...leads, 0xED, 0xEE]) for (let t = 0x40; t <= 0xFC; t++) if (t !== 0x7F) put([l, t]);
+  return (sjisMap = m);
+}
+function encodeSjis(text) {
+  const m = sjisTable(), out = [];
+  let line = 1;
+  for (const ch of text) {
+    const b = m.get(ch);
+    if (!b) throw new Error('Shift_JIS で表せない文字「' + ch + '」が ' + line + ' 行目にあるので、保存しませんでした。その文字を消すか、別の文字にしてください。');
+    for (const x of b) out.push(x);
+    if (ch === '\n') line++;
+  }
+  return new Uint8Array(out);
+}
+// 文字コードと改行コードを画面の上に出す
+function showFmt() {
+  const c = current, eol = c && (c.crlf ? 'CRLF' : 'LF');
+  $('fmt').textContent = !c ? '' : (c.enc === 'shift_jis' ? 'Shift_JIS' : 'UTF-8' + (c.bom ? '（BOM付き）' : '')) + ' ・ ' + eol + (c.mixed ? '（改行がまざっています。保存すると ' + eol + ' にそろいます）' : '');
+}
+
 // 元の BOM と改行の形で書く。write と close の両方が済んでから成功
 async function writeText(handle, text, fmt) {
   if (await handle.queryPermission({ mode: 'readwrite' }) !== 'granted' &&
       await handle.requestPermission({ mode: 'readwrite' }) !== 'granted') throw new Error('書き込みが許可されていません');
-  const w = await handle.createWritable();
   const out = (fmt.bom ? '\uFEFF' : '') + (fmt.crlf ? text.replace(/\n/g, '\r\n') : text);
-  try { await w.write(out); await w.close(); }
+  const data = fmt.enc === 'shift_jis' ? encodeSjis(out) : out;   // 書けない文字があれば、ファイルを開く前に止める
+  const w = await handle.createWritable();
+  try { await w.write(data); await w.close(); }
   catch (e) { try { await w.abort(); } catch (_) {} throw e; }
 }
 
@@ -435,7 +482,7 @@ async function save() {
     showMsg('保存に失敗しました。変更はまだ画面に残っています。' + errText(e), 'err');
     return false;
   }
-  savedText = text;
+  savedText = text; current.mixed = false; showFmt();
   setDirty($('editor').value !== savedText);
   showMsg('保存しました：' + current.path, 'ok');
   return true;
@@ -518,7 +565,7 @@ async function deleteEntry(node) {
     return false;
   }
   if (hitsCurrent) {
-    current = null; savedText = ''; setDirty(false);
+    current = null; showFmt(); savedText = ''; setDirty(false);
     $('editor').value = ''; $('editor').classList.add('hidden'); $('welcome').classList.remove('hidden');
     $('welcome').textContent = '左の木からノートを選ぶか、「新しいノート」を作ってください。';
     $('fileName').textContent = 'ノートが選ばれていません'; $('btnSave').disabled = true;
@@ -653,6 +700,22 @@ async function copyTree(h, destDir, name) {
   if (back.length !== bytes.length || back.some((b, i) => b !== bytes[i])) throw new Error('コピーした「' + name + '」の中身が元と違います');
 }
 
+// ---------- 行番号（折り返した行も合わせる：見えない写しで、行ごとの高さを測る） ----------
+// shortcut: 打つたびに全部の行を作り直す。数万行で重くなったら、見えている所だけ作る形にする
+let gutterReq = 0;
+function updateGutter() { cancelAnimationFrame(gutterReq); gutterReq = requestAnimationFrame(drawGutter); }
+function drawGutter() {
+  const ed = $('editor'), g = $('gutter'), mir = $('mirror');
+  if (ed.classList.contains('hidden')) { g.replaceChildren(); return; }
+  const cs = getComputedStyle(ed);
+  mir.style.width = (ed.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight)) + 'px';
+  mir.replaceChildren(...ed.value.split('\n').map(l => { const d = document.createElement('div'); d.textContent = l || ' '; return d; }));
+  const hs = [...mir.children].map(d => d.getBoundingClientRect().height);
+  mir.replaceChildren();
+  g.replaceChildren(...hs.map((h, i) => { const d = document.createElement('div'); d.textContent = i + 1; d.style.height = h + 'px'; return d; }));
+  g.scrollTop = ed.scrollTop;
+}
+
 // ---------- 検索と置き換え ----------
 const MAX_HITS = 2000;
 // 入力から正規表現を作る。まちがいなら赤で知らせて null
@@ -758,7 +821,7 @@ $('splitter').addEventListener('pointerdown', e => {
 addEventListener('resize', () => setSideWidth(parseInt($('side').style.width)));
 // 今開いているファイルは、画面の文（未保存も含む）で探す
 async function fileText(f) {
-  if (current && current.path === f.path) return { text: $('editor').value, bom: current.bom, crlf: current.crlf };
+  if (current && current.path === f.path) return { text: $('editor').value, bom: current.bom, crlf: current.crlf, enc: current.enc };
   return readText(f.handle);
 }
 async function gotoLine(f, line) {
@@ -860,6 +923,8 @@ function runBlocked() {
   if (['replace', 'delete'].includes($('sOp').value) && !$('sQuery').value) return 'この操作は、探す文字が要ります。';
   return '';
 }
+// 正規表現のときの置き換える文字：\n は改行、\t はタブ、\\ は \ そのもの。半角の ¥ も \ として扱う（$1 などはそのまま）
+const expandRep = r => r.replace(/¥/g, '\\').replace(/\\([nt\\])/g, (m, c) => c === 'n' ? '\n' : c === 't' ? '\t' : '\\');
 const SPACE = '[ \\u3000\\t]+';   // 半角スペース・全角スペース・タブ
 function runOp() {
   const why = runBlocked(); if (why) { note(why, 'err'); return false; }
@@ -872,7 +937,7 @@ function runOp() {
   if (op === 'replace') {
     const rep = $('sReplace').value;
     // 正規表現のときは $1 などが使える。ふつうの検索のときは、置き換える文字をそのまま入れる
-    after = $('sRegex').checked ? before.replace(re, rep) : before.replace(re, () => rep);
+    after = $('sRegex').checked ? before.replace(re, expandRep(rep)) : before.replace(re, () => rep);
     const al = after.split('\n');
     changed = al.length === lines.length ? lines.filter((l, i) => l !== al[i]).length : [...before.matchAll(re)].length;
     text = changed + ' 行を置き換えました';
@@ -1021,7 +1086,11 @@ $('fQuery').addEventListener('input', fileSearchSoon);
 ['sQuery', 'sRegex', 'sCase', 'sReplace', 'sOp'].forEach(id => $(id).addEventListener('input', () => { note(''); refreshState(); if (id !== 'sReplace' && id !== 'sOp') { forgetHits(); $('hitInfo').textContent = ''; } }));
 $('btnNewFolder').onclick = () => { const n = prompt('新しいフォルダの名前'); if (n !== null) createEntry('dir', n); };
 $('btnNewNote').onclick = () => { const n = prompt('新しいノートの名前（.md が付きます）'); if (n !== null) createEntry('file', n); };  // 未保存の確かめは openNote でする
-$('editor').addEventListener('input', () => { setDirty($('editor').value !== savedText); forgetHits(); });   // 中身が変わったら、次の検索で探し直す
+$('editor').addEventListener('input', () => { setDirty($('editor').value !== savedText); forgetHits(); updateGutter(); });   // 中身が変わったら、次の検索で探し直す
+$('editor').addEventListener('scroll', () => { $('gutter').scrollTop = $('editor').scrollTop; });
+new ResizeObserver(updateGutter).observe($('editor'));   // 幅が変わると折り返しが変わる
+// 編集画面を隠すときは、行番号も一緒に隠す（隠す所が何か所もあるので、ここ1か所で合わせる）
+new MutationObserver(() => { $('edRow').classList.toggle('hidden', $('editor').classList.contains('hidden')); updateGutter(); }).observe($('editor'), { attributes: true, attributeFilter: ['class'] });
 document.addEventListener('keydown', e => {
   if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
   const k = e.key.toLowerCase();
